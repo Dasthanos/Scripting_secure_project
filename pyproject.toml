@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "secureguard-offline"
+version = "0.3.0"
+description = "Offline AST, RAG, and local-LLM security review for Python and C/C++"
+requires-python = ">=3.10"
+dependencies = []
+
+[project.scripts]
+secureguard = "secureguard.cli:main"
+
+[tool.setuptools]
+packages = ["secureguard"]
+
+[tool.setuptools.package-data]
+secureguard = ["knowledge_base.jsonl"]
