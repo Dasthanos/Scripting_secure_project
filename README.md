@@ -59,6 +59,32 @@ python3 secure_audit.py samples/vulnerable_app.py --model qwen2.5-coder:3b --out
 
 The default endpoint is `http://localhost:11434`. The project refuses a non-loopback Ollama host so source code is not sent to a remote service. If Ollama or the selected model is unavailable, AST and RAG analysis still complete and the run metadata records that the LLM stage was unavailable. `--no-llm` disables the model stage explicitly. The report distinguishes model proposals, proposals accepted by the evidence gate, duplicates of static findings, and unique findings added by the model. A connected model can return zero proposals.
 
+## Use chunking and semantic retrieval
+
+The default retrieval method is BM25, which runs without Ollama in `--no-llm` mode. Select a locally installed embedding model
+to index the CWE knowledge base for semantic search. For example:
+
+```sh
+ollama pull all-minilm
+python3 secure_audit.py --doctor --no-llm --embedding-model all-minilm
+python3 secure_audit.py --demo --no-llm --embedding-model all-minilm --out demo_embedding
+```
+
+Keep an Ollama version that supports `/api/embed` running while scanning. In this command, `--no-llm` disables generative code review.
+The embedding model still runs locally. Remove `--no-llm` to also use a separately installed chat model.
+
+For semantic retrieval, SecureGuard splits each record's description, mitigation, examples,
+and keywords into chunks of up to 360 UTF-8 bytes with up to 60 bytes of overlap. It keeps
+the CWE and record field with each chunk. Ollama embeds the chunks and the search query with
+the same model. SecureGuard ranks chunks by cosine similarity and keeps the highest-scoring
+chunk per CWE, filtered by source language. Exact CWE lookups still take priority where the
+analyzer supplied an ID.
+
+The index is built per run. `run.json` includes the model name, chunk count and vector dimensions.
+Findings that use semantic retrieval record the matched passage in `findings.json` and `report.md`.
+If the requested embedding model cannot run, the command reports an error. Run without
+`--embedding-model` to use BM25.
+
 ## Use another local knowledge base
 
 The `--kb` option accepts one or more JSONL files (one JSON object per line), a JSON array, or a JSON object containing a record list. You can merge the bundled notes with a larger CWE database:
