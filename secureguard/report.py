@@ -8,6 +8,18 @@ from typing import Any
 
 
 def write(findings: list[dict[str, Any]], metadata: dict[str, Any], out_dir: Path) -> None:
+    # Evidence contains source text. Hide it for every finding on a credential line.
+    credential_lines = {
+        (finding.get("file"), finding.get("line"))
+        for finding in findings
+        if finding.get("cwe") == "CWE-798"
+    }
+    findings = [
+        {**finding, "evidence": "[REDACTED]"}
+        if (finding.get("file"), finding.get("line")) in credential_lines
+        else finding
+        for finding in findings
+    ]
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "findings.json").write_text(
         json.dumps(findings, indent=2, ensure_ascii=False), encoding="utf-8")
@@ -42,7 +54,7 @@ def write(findings: list[dict[str, Any]], metadata: dict[str, Any], out_dir: Pat
     sarif = {
         "version": "2.1.0",
         "runs": [{"tool": {"driver": {
-            "name": "SecureGuard", "semanticVersion": "0.3.0",
+            "name": "SecureGuard", "semanticVersion": "0.4.0",
             "rules": list(rule_rows.values()),
         }}, "results": sarif_results}],
     }
@@ -67,6 +79,12 @@ def write(findings: list[dict[str, Any]], metadata: dict[str, Any], out_dir: Pat
              f"- Findings whose CWE was absent from the knowledge base: {metadata.get('missing_cwe_references', 0)}",
              f"- Duration: {metadata.get('elapsed_seconds', 'not recorded')} seconds", "",
              "> Findings are candidates for human review. Static patterns and LLM output do not prove exploitability.", ""]
+    if metadata.get("rag_search_method") == "embedding":
+        lines[3:3] = [
+            f"- Embedding model: {metadata['rag_embedding_model']}",
+            f"- Indexed knowledge-base chunks: {metadata['rag_embedding_chunks']}",
+            f"- Embedding dimensions: {metadata['rag_embedding_dimensions']}",
+        ]
     kb_sources = rag_stats.get("sources", [])
     if kb_sources:
         lines.insert(7, "- Knowledge-base files: " + ", ".join(f"`{name}`" for name in kb_sources))
@@ -125,6 +143,18 @@ def write(findings: list[dict[str, Any]], metadata: dict[str, Any], out_dir: Pat
             reference = refs[0]
             reference_label = "Local CWE reference" if reference.get("cwe") == finding.get("cwe") else "Related local reference"
             lines.append(f"- **{reference_label}:** {reference.get('cwe')} {reference.get('title')}")
+            method = {"exact_cwe": "Exact CWE match", "bm25": "BM25 text match",
+                      "embedding": "Embedding similarity"}.get(
+                reference.get("retrieval_method"))
+            if method:
+                lines.append(f"- **Retrieval method:** {method}")
+            if kb_file := reference.get("knowledge_base_file"):
+                lines.append(f"- **Knowledge-base file:** `{kb_file}`")
+            if source := reference.get("source"):
+                lines.append(f"- **Reference source:** {source}")
+            if chunk := reference.get("matched_chunk"):
+                lines.append(f"- **Matched chunk:** {chunk['field']} #{chunk['number']}")
+                lines.append(f"- **Retrieved passage:** {' '.join(chunk['text'].split())}")
             if reference.get("cwe") == finding.get("cwe"):
                 description = str(reference.get("description", "")).strip()
                 mitigation = str(reference.get("mitigation", "")).strip()

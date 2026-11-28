@@ -153,7 +153,7 @@ class Analyzer:
                 self.add(item, "CWE-295", "TLS certificate verification is disabled",
                          "An SSL context is created without verifying the peer certificate.", 0.88)
             if name in {"tempfile.mktemp", "mktemp"}:
-                self.add(item, "CWE-377", "Insecure temporary file name generation",
+                self.add(item, "CWE-367", "Insecure temporary file name generation",
                          "mktemp() returns a path before creating the file, leaving a race window for another process.", 0.9)
             if name in {"hashlib.md5", "hashlib.sha1", "md5", "sha1"}:
                 self.add(item, "CWE-327", "Use of a potentially weak hash algorithm",

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .analyzer import analyze_file
+from .embeddings import OllamaEmbedder
 from .llm import LocalModelError, OllamaAuditor, validate_model_findings
 from .rag import LocalRAG, language_for_path
 from .report import write
@@ -31,10 +32,16 @@ def source_files(path: Path) -> list[Path]:
 
 
 def run(path: Path, out_dir: Path, kb_path: Path | list[Path], model_name: str | None,
-        host: str, timeout: int, log=print, rag_limit: int = 4) -> list[dict[str, Any]]:
+        host: str, timeout: int, log=print, rag_limit: int = 4,
+        embedding_model: str | None = None) -> list[dict[str, Any]]:
     start = time.time()
     files = source_files(path)
     rag = LocalRAG.from_files(kb_path if isinstance(kb_path, list) else [kb_path])
+    embedding_chunks = 0
+    if embedding_model:
+        log(f"[RAG] Indexing knowledge-base chunks with {embedding_model}")
+        embedding_chunks = rag.index_embeddings(OllamaEmbedder(embedding_model, host, timeout))
+        log(f"[RAG] Indexed {embedding_chunks} chunks ({rag.embedder.dimensions} dimensions)")
     model = OllamaAuditor(model_name, host=host, timeout=timeout) if model_name else None
     findings: list[dict[str, Any]] = []
     llm_status = "disabled" if model is None else "ready"
@@ -79,7 +86,7 @@ def run(path: Path, out_dir: Path, kb_path: Path | list[Path], model_name: str |
                 log("  local LLM auditor: reviewing source with retrieved references")
                 preferred_cwes = [item.get("cwe", "") for item in static_findings]
                 retrieved = rag.context(source, limit=rag_limit, lang=file_language,
-                                        preferred_cwes=preferred_cwes)
+                                        preferred_cwes=preferred_cwes, search_hits=file_refs)
                 model_rows = model.audit(source, str(file), retrieved, static_findings)
                 model_metrics["requests"] += model.last_audit_chunks
                 gate: dict[str, Any] = {}
@@ -145,12 +152,18 @@ def run(path: Path, out_dir: Path, kb_path: Path | list[Path], model_name: str |
         "model_metrics": model_metrics,
         "rag_knowledge_base_documents": len(rag.records),
         "rag_base": rag_stats,
+        "rag_search_method": "embedding" if embedding_model else "bm25",
+        "rag_embedding_model": embedding_model,
+        "rag_embedding_chunks": embedding_chunks,
+        "rag_embedding_dimensions": rag.embedder.dimensions if rag.embedder else 0,
         "rag_retrieval_limit_per_file": rag_limit,
         "rag_retrievals": rag_retrievals,
         "exact_cwe_references": exact_cwe_references,
         "missing_cwe_references": missing_cwe_references,
         "elapsed_seconds": round(time.time() - start, 2),
-        "pipeline": ["Python AST + C/C++ source-to-sink analyzers", "local BM25 RAG", "local Ollama auditor (optional)",
+        "pipeline": ["Python AST + C/C++ source-to-sink analyzers",
+                     "local embedding RAG" if embedding_model else "local BM25 RAG",
+                     "local Ollama auditor (optional)",
                      "exact-evidence validation", "JSON/Markdown reporter"],
     }
     write(findings, metadata, out_dir)

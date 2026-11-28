@@ -46,7 +46,7 @@ def open_unverified_tls_context():
 
 
 def create_temporary_path():
-    # CWE-377: another process can race the later file creation.
+    # CWE-367: another process can create the path before the file is opened.
     return tempfile.mktemp()
 
 

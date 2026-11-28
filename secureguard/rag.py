@@ -11,8 +11,11 @@ import json
 import math
 import re
 from collections import Counter
+from operator import mul
 from pathlib import Path
 from typing import Any, Iterable
+
+from .embeddings import OllamaEmbedder, text_chunks
 
 
 TOKEN = re.compile(r"(?:CWE|CVE)-\d+(?:-\d+)?|[A-Za-z_][A-Za-z0-9_]*|\d+", re.I)
@@ -219,6 +222,9 @@ class LocalRAG:
             raise ValueError("The knowledge base contains no usable CWE records.")
 
         self.records = canonical
+        self.embedder: OllamaEmbedder | None = None
+        self.embedding_chunks: list[tuple[int, str, int, str]] = []
+        self.embedding_vectors = []
         self.docs: list[Counter[str]] = []
         self.doc_lengths: list[int] = []
         df: Counter[str] = Counter()
@@ -255,7 +261,8 @@ class LocalRAG:
         source_names: list[str] = []
         for path in paths:
             loaded, skipped = _load_rows(Path(path))
-            rows.extend(loaded)
+            rows.extend({**row, "knowledge_base_file": Path(path).name}
+                        if isinstance(row, dict) else row for row in loaded)
             malformed += skipped
             source_names.append(Path(path).name)
         return cls(rows, load_stats={
@@ -295,10 +302,56 @@ class LocalRAG:
 
         return {**min(candidates, key=rank), "score": 100.0, "retrieval_method": "exact_cwe"}
 
+    def index_embeddings(self, embedder: OllamaEmbedder) -> int:
+        chunks: list[tuple[int, str, int, str]] = []
+        texts = []
+        for index, row in enumerate(self.records):
+            title = text_chunks(row["title"], size=100, overlap=0)[0]
+            heading = f"{row['cwe']} {title}"
+            first_chunk = len(chunks)
+            for field in ("description", "mitigation", "safe", "unsafe", "keywords"):
+                for number, text in enumerate(text_chunks(_as_text(row[field])), 1):
+                    chunks.append((index, field, number, text))
+                    texts.append(f"{heading}\n{field}: {text}")
+            if len(chunks) == first_chunk:
+                chunks.append((index, "title", 1, heading))
+                texts.append(heading)
+        self.embedding_vectors = embedder.embed(texts)
+        self.embedding_chunks = chunks
+        self.embedder = embedder
+        return len(chunks)
+
+    def _search_embeddings(self, query: str, limit: int, lang: str) -> list[dict[str, Any]]:
+        query_vectors = self.embedder.embed(text_chunks(query))
+        if not query_vectors:
+            return []
+        best_by_cwe: dict[str, tuple[float, int]] = {}
+        for chunk_index, ((row_index, _, _, _), vector) in enumerate(
+                zip(self.embedding_chunks, self.embedding_vectors)):
+            row = self.records[row_index]
+            if not self._language_compatible(row["lang"], lang):
+                continue
+            score = max(sum(map(mul, vector, query_vector)) for query_vector in query_vectors)
+            cwe = row["cwe"]
+            if score > 0 and (cwe not in best_by_cwe or score > best_by_cwe[cwe][0]):
+                best_by_cwe[cwe] = score, chunk_index
+
+        hits = []
+        for score, chunk_index in sorted(best_by_cwe.values(), key=lambda item: (-item[0], item[1]))[:limit]:
+            row_index, field, number, text = self.embedding_chunks[chunk_index]
+            hits.append({**self.records[row_index], "score": round(score, 4),
+                         "retrieval_method": "embedding",
+                         "matched_chunk": {"field": field, "number": number, "text": text}})
+        return hits
+
     def search(self, query: str, limit: int = 3, lang: str | None = None) -> list[dict[str, Any]]:
         requested_language = normalize_language(lang)
+        if limit <= 0:
+            return []
+        if self.embedder:
+            return self._search_embeddings(query, limit, requested_language)
         query_counts = Counter(tokens(query))
-        if not query_counts or limit <= 0:
+        if not query_counts:
             return []
         ranked: list[tuple[float, int]] = []
         for index, row in enumerate(self.records):
@@ -335,7 +388,7 @@ class LocalRAG:
             if cwe in seen_cwes:
                 continue
             seen_cwes.add(cwe)
-            hits.append({**row, "score": round(score, 3)})
+            hits.append({**row, "score": round(score, 3), "retrieval_method": "bm25"})
             if len(hits) >= limit:
                 break
         return hits
@@ -348,7 +401,8 @@ class LocalRAG:
         return text[:limit].rstrip() + " …"
 
     def context(self, query: str, limit: int = 3, lang: str | None = None,
-                max_chars: int = 5200, preferred_cwes: Iterable[str] | None = None) -> str:
+                max_chars: int = 5200, preferred_cwes: Iterable[str] | None = None,
+                search_hits: list[dict[str, Any]] | None = None) -> str:
         if limit <= 0:
             return "No matching local security references were retrieved."
         # Findings already have a CWE from the static analyzer. Include those exact
@@ -363,7 +417,9 @@ class LocalRAG:
                 if len(hits) >= limit:
                     break
         if len(hits) < limit:
-            for item in self.search(query, limit=limit, lang=lang):
+            if search_hits is None:
+                search_hits = self.search(query, limit=limit, lang=lang)
+            for item in search_hits:
                 if item["cwe"] not in seen_cwes:
                     hits.append(item)
                     seen_cwes.add(item["cwe"])
@@ -374,6 +430,10 @@ class LocalRAG:
         blocks: list[str] = []
         for item in hits:
             block = [f"[{item.get('cwe')} — {self._clip(item.get('title'), 180)}]"]
+            if chunk := item.get("matched_chunk"):
+                block.append(f"Retrieved {chunk['field']}: {chunk['text']}")
+                blocks.append("\n".join(block))
+                continue
             description = self._clip(item.get("description"), 440)
             if description:
                 block.append(f"Description: {description}")

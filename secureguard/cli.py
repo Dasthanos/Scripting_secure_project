@@ -26,9 +26,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--rag-limit", type=int, default=4,
                         help="maximum distinct CWE references retrieved per source file (1-10)")
     parser.add_argument("--model", default="qwen2.5-coder:3b", help="installed local Ollama model")
+    parser.add_argument("--embedding-model", help="local Ollama model for chunk-based semantic retrieval")
     parser.add_argument("--host", default="http://localhost:11434", help="local Ollama endpoint")
     parser.add_argument("--timeout", type=int, default=180, help="local model request timeout in seconds")
-    parser.add_argument("--no-llm", action="store_true", help="run offline AST+RAG stages without calling Ollama")
+    parser.add_argument("--no-llm", action="store_true", help="disable Ollama code review; an explicitly selected embedding model can still run")
     parser.add_argument("--doctor", action="store_true", help="check local Ollama and whether the selected model is installed")
     args = parser.parse_args(argv)
     if args.doctor:
@@ -38,10 +39,16 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(str(exc))
         print(f"Ollama is available at {args.host}.")
         print("Installed models: " + (", ".join(models) if models else "none"))
-        if args.model not in models and f"{args.model}:latest" not in models:
-            print(f"Selected model is missing: {args.model}")
-            return 1
-        print(f"Selected model is installed: {args.model}")
+        selected_models = []
+        if not args.no_llm or not args.embedding_model:
+            selected_models.append(args.model)
+        if args.embedding_model:
+            selected_models.append(args.embedding_model)
+        for selected in selected_models:
+            if selected not in models and f"{selected}:latest" not in models:
+                print(f"Selected model is missing: {selected}")
+                return 1
+            print(f"Selected model is installed: {selected}")
         return 0
     if args.demo and args.path is not None:
         parser.error("use either --demo or a source path, not both")
@@ -60,7 +67,7 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--rag-limit must be between 1 and 10")
     try:
         run(scan_path, args.out, args.kb, None if args.no_llm else args.model,
-            args.host, args.timeout, rag_limit=args.rag_limit)
+            args.host, args.timeout, rag_limit=args.rag_limit, embedding_model=args.embedding_model)
     except (OSError, ValueError, RuntimeError) as exc:
         parser.error(str(exc))
     return 0
